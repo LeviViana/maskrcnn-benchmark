@@ -5,8 +5,6 @@ from torchvision import transforms as T
 from maskrcnn_benchmark.modeling.detector import build_detection_model
 from maskrcnn_benchmark.utils.checkpoint import DetectronCheckpointer
 from maskrcnn_benchmark.structures.image_list import to_image_list
-from maskrcnn_benchmark.modeling.roi_heads.mask_head.inference import Masker
-from maskrcnn_benchmark import layers as L
 from maskrcnn_benchmark.utils import cv2_util
 from maskrcnn_benchmark.structures.boxlist_ops import *
 from maskrcnn_benchmark.structures.bounding_box import BoxList
@@ -91,6 +89,7 @@ class Inferencer(object):
         return prediction
     
     def compute_prediction_list(self, image_list):
+        image_list = image_list.to(self.device)
         # compute predictions
         with torch.no_grad():
             predictions = self.model(image_list)
@@ -155,17 +154,18 @@ class Inferencer(object):
     def _inference_list(self, image_list):
         predictions = self.compute_prediction_list(image_list)
         
-        tensors_flip = torch.empty((0, *image_list.tensors.size()[1:]))
-        for t in image_list.tensors:
-            tmp = T.ToTensor()(T.functional.hflip(T.ToPILImage()(t)))
-            tmp = self.pre_processing(tmp)
-            tensors_flip = torch.cat((tensors_flip, tmp.unsqueeze(0)))
-        
-        image_list_flip = image_list
-        image_list_flip.tensors = tensors_flip
+        tensors_flip = []
+        for t, (height, width) in zip(image_list.tensors, image_list.image_sizes):
+            im = t.permute(1, 2, 0).cpu().detach().numpy()
+            im = im[:height, range(im.shape[1])[::-1][-width:], :]
+            t = T.ToTensor()(im)
+            tensors_flip += [t]
+
+        image_list_flip = to_image_list(tensors_flip, self.cfg.DATALOADER.SIZE_DIVISIBILITY)
+        image_list_flip.to(self.device)
         
         predictions_flip = self.compute_prediction_list(image_list_flip)
-
+        
         pred1 = [p.transpose(0) for p in predictions_flip]
         pred2 = predictions
         
@@ -226,7 +226,7 @@ class Inferencer(object):
             final_boxlist = BoxList(all_boxes, img_size)
             final_boxlist.add_field("scores", all_scores)
             final_boxlist.add_field("labels", all_labels)
-            final_boxlist = boxlist_nms(final_boxlist, 0.7, score_field="scores")
+            final_boxlist = boxlist_nms(final_boxlist, 0.5, score_field="scores")
             
         else:
             final_boxlist = BoxList(torch.empty((0, 4)), img_size)
